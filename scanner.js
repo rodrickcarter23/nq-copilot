@@ -7,7 +7,7 @@ const { sendDiscordAlert } = require("./services/alertEngine");
 let lastAlertKey = "";
 let lastAlertTime = 0;
 
-const SCAN_EVERY_MS = 5000;
+const SCAN_EVERY_MS = 30000;
 const COOLDOWN_MS = 5 * 60 * 1000;
 
 async function scanMarket() {
