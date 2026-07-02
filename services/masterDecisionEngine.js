@@ -16,7 +16,7 @@ function getDirection(...values) {
 }
 
 function buildMasterDecision({
-  market,
+  market = {},
   analysis = {},
   setup = {},
   institutional = {},
@@ -34,181 +34,158 @@ function buildMasterDecision({
   const warnings = [];
 
   const direction = getDirection(
-    institutional.direction,
-    smartEntry.direction,
     analysis.bias,
     analysis.direction,
+    institutional.direction,
+    smartEntry.direction,
     setup.direction,
     trendContinuation.direction,
     multiTimeframe.bias
   );
 
-  let score = 0;
+  const marketMode = String(market.mode || "").toUpperCase();
+  const marketStatus = String(market.sessionStatus || market.marketStatus || market.status || "").toUpperCase();
 
   const marketScore = Number(analysis.score || analysis.marketScore || 0);
   const institutionalScore = Number(institutional.institutionalScore || institutional.score || 0);
-  const smartEntryReady = ["A+ WATCH", "WATCH FOR ENTRY", "WAIT FOR CONFIRMATION"].includes(
-    smartEntry.entryDecision
-  );
+  const setupScore = Number(setup.score || 0);
+  const riskScore = Number(riskManager.riskScore || 0);
 
-  score += weightedScore("Market score", marketScore, 20, reasons, warnings);
-  score += weightedScore("Institutional score", institutionalScore, 25, reasons, warnings);
-
-  if (smartEntry.direction === direction && smartEntryReady) {
-    score += 15;
-    reasons.push(`Smart Entry supports ${direction}.`);
-  } else {
-    warnings.push("Smart Entry is not fully aligned.");
+  if (marketMode === "FALLBACK" || marketMode === "STALE") {
+    return buildResult({
+      score: 0,
+      grade: "F",
+      confidence: "LOW",
+      direction: "NEUTRAL",
+      action: "NO TRADE - DATA",
+      tradeAllowed: false,
+      summary: "No trade. Market data is fallback/stale.",
+      reasons,
+      warnings: ["Market data is not reliable."],
+      market,
+      analysis,
+      setup,
+      smartEntry,
+      riskManager,
+    });
   }
 
-  if (trendContinuation.direction === direction) {
+  let score = 0;
+
+  score += scoreBucket("Market score", marketScore, 30, reasons, warnings);
+  score += scoreBucket("Institutional score", institutionalScore, 25, reasons, warnings);
+  score += scoreBucket("Setup score", setupScore, 15, reasons, warnings);
+
+  if (smartEntry.direction === direction && smartEntry.entryDecision !== "WAIT") {
     score += 10;
-    reasons.push("Trend continuation agrees.");
+    reasons.push("Smart Entry supports the direction.");
   } else {
-    warnings.push("Trend continuation has not confirmed.");
+    warnings.push("Smart Entry is not fully ready.");
   }
 
-  if (multiTimeframe.bias === direction) {
-    score += 10;
-    reasons.push("Multi-timeframe agrees.");
-  } else {
-    warnings.push("Multi-timeframe is not fully aligned.");
-  }
-
-  if (fvg.direction === direction || fvg.activeFVG) {
-    score += 7;
+  if (fvg.direction === direction || fvg.activeFVG || fvg.priceInsideFVG || fvg.priceInside) {
+    score += 6;
     reasons.push("FVG supports the setup.");
   } else {
     warnings.push("FVG not confirmed.");
   }
 
   if (liquidity.sweep || liquidity.liquiditySweep || liquidity.bias) {
-    score += 7;
+    score += 6;
     reasons.push("Liquidity condition is present.");
   } else {
     warnings.push("Liquidity not confirmed.");
   }
 
-  if (orderBlocks.direction === direction) {
+  if (trendContinuation.direction === direction) {
     score += 5;
-    reasons.push("Order block supports direction.");
+    reasons.push("Trend continuation agrees.");
   } else {
-    warnings.push("Order block not aligned.");
+    warnings.push("Trend continuation not fully aligned.");
   }
 
   if (
     (direction === "LONG" && premiumDiscount.bias === "BUYERS") ||
     (direction === "SHORT" && premiumDiscount.bias === "SELLERS")
   ) {
-    score += 5;
+    score += 3;
     reasons.push("Premium/discount supports direction.");
   }
 
-  if (riskManager.tradeAllowed) {
-    score += 6;
-    reasons.push("Risk manager allows the setup.");
-  } else if (Number(riskManager.riskScore || 0) >= 40) {
-    score += 2;
-    warnings.push("Risk manager is cautious, but not a full rejection.");
+  if (orderBlocks.direction === direction || orderBlocks.priceInsideOB || orderBlocks.priceInside) {
+    score += 3;
+    reasons.push("Order block supports direction.");
   } else {
-    warnings.push("Risk manager is blocking execution.");
+    warnings.push("Order block is missing or not aligned.");
   }
 
-  if (volumeProfile.insideValue) {
-    warnings.push("Price is inside value area; chop risk exists.");
-  } else {
+  if (riskManager.tradeAllowed) {
     score += 3;
-    reasons.push("Price is outside value area.");
+    reasons.push("Risk manager allows trade.");
+  } else if (riskScore >= 40) {
+    score += 1;
+    warnings.push("Risk is cautious, use smaller size/MNQ.");
+  } else {
+    warnings.push("Risk manager is blocking execution.");
   }
 
   score = clamp(Math.round(score));
 
   const grade = getGrade(score);
   const confidence = getConfidence(score);
-  const action = getAction({
-    score,
-    direction,
-    marketScore,
-    institutionalScore,
-    smartEntry,
-    riskManager,
-  });
 
-  const entry =
-    Number(smartEntry.entry) ||
-    Number(riskManager.entry) ||
-    Number(analysis.entry) ||
-    Number(market?.price) ||
-    0;
+  const marketClosed =
+    String(market.marketOpen).toLowerCase() === "false" ||
+    marketStatus.includes("CLOSED") ||
+    marketStatus.includes("MAINTENANCE");
 
-  const stop =
-    Number(smartEntry.stopLoss) ||
-    Number(smartEntry.stop) ||
-    Number(riskManager.stop) ||
-    Number(analysis.stop) ||
-    0;
+  const riskHardBlock =
+    riskManager.tradeAllowed === false && riskScore < 25;
 
-  const target1 =
-    Number(smartEntry.target1) ||
-    Number(analysis.target1) ||
-    0;
+  let action = "NO TRADE";
 
-  const target2 =
-    Number(smartEntry.target2) ||
-    Number(analysis.target2) ||
-    0;
+  if (direction === "NEUTRAL") {
+    action = "NO TRADE";
+  } else if (marketClosed) {
+    action = "WAIT FOR OPEN";
+  } else if (riskHardBlock && score < 85) {
+    action = "NO TRADE - RISK";
+  } else if (score >= 90) {
+    action = "TAKE TRADE";
+  } else if (score >= 80) {
+    action = "WATCH FOR ENTRY";
+  } else if (score >= 70) {
+    action = "WATCH CHART";
+  } else if (score >= 60) {
+    action = "WATCH ONLY";
+  } else {
+    action = "NO TRADE";
+  }
 
   const tradeAllowed =
     action === "TAKE TRADE" ||
-    action === "ENTER NOW" ||
     action === "WATCH FOR ENTRY" ||
-    action === "A+ WATCH";
+    action === "WATCH CHART";
 
-  return {
-    masterScore: score,
+  return buildResult({
     score,
     grade,
     confidence,
     direction,
     action,
     tradeAllowed,
-
-    entry: round(entry),
-    stop: round(stop),
-    target1: round(target1),
-    target2: round(target2),
-
-    riskLevel: riskManager.riskLevel || "UNKNOWN",
-    riskScore: riskManager.riskScore || 0,
-
-    setupName: setup.setupName || "UNKNOWN",
-    smartEntryDecision: smartEntry.entryDecision || "WAIT",
-
-    summary: buildSummary(score, direction, action),
-
+    summary: `${action}: ${direction} with master score ${score}/100.`,
     reasons,
     warnings,
-
-    checklist: [
-      { name: "Market score strong", passed: marketScore >= 75 },
-      { name: "Institutional score strong", passed: institutionalScore >= 75 },
-      { name: "Smart Entry supports direction", passed: smartEntry.direction === direction },
-      { name: "Trend supports direction", passed: trendContinuation.direction === direction },
-      { name: "Multi-timeframe supports direction", passed: multiTimeframe.bias === direction },
-      { name: "Risk manager allows setup", passed: riskManager.tradeAllowed === true },
-      {
-        name: "FVG supports direction",
-        passed: fvg.direction === direction || fvg.activeFVG === true,
-      },
-      {
-        name: "Liquidity present",
-        passed: liquidity.sweep === true || liquidity.liquiditySweep === true || Boolean(liquidity.bias),
-      },
-    ],
-  };
+    market,
+    analysis,
+    setup,
+    smartEntry,
+    riskManager,
+  });
 }
 
-function weightedScore(name, value, maxPoints, reasons, warnings) {
+function scoreBucket(name, value, maxPoints, reasons, warnings) {
   const n = Number(value || 0);
 
   if (n >= 90) {
@@ -252,41 +229,77 @@ function getConfidence(score) {
   return "LOW";
 }
 
-function getAction({ score, direction, marketScore, institutionalScore, smartEntry, riskManager }) {
-  if (direction === "NEUTRAL") return "NO TRADE";
+function buildResult({
+  score,
+  grade,
+  confidence,
+  direction,
+  action,
+  tradeAllowed,
+  summary,
+  reasons,
+  warnings,
+  market,
+  analysis,
+  setup,
+  smartEntry,
+  riskManager,
+}) {
+  const entry =
+    Number(smartEntry.entry) ||
+    Number(riskManager.entry) ||
+    Number(analysis.entry) ||
+    Number(market.price) ||
+    0;
 
-  const veryStrong =
-    score >= 85 ||
-    marketScore >= 90 ||
-    institutionalScore >= 90 ||
-    smartEntry.entryDecision === "A+ WATCH";
+  const stop =
+    Number(smartEntry.stopLoss) ||
+    Number(smartEntry.stop) ||
+    Number(riskManager.stop) ||
+    Number(analysis.stop) ||
+    0;
 
-  const strong =
-    score >= 70 ||
-    marketScore >= 80 ||
-    institutionalScore >= 80 ||
-    smartEntry.entryDecision === "WATCH FOR ENTRY";
+  const target1 =
+    Number(smartEntry.target1) ||
+    Number(analysis.target1) ||
+    0;
 
-  const riskHardBlocked =
-    riskManager.tradeAllowed === false && Number(riskManager.riskScore || 0) < 25;
+  const target2 =
+    Number(smartEntry.target2) ||
+    Number(analysis.target2) ||
+    0;
 
-  if (riskHardBlocked && !veryStrong) return "NO TRADE - RISK";
+  return {
+    masterScore: score,
+    score,
+    grade,
+    confidence,
+    direction,
+    action,
+    tradeAllowed,
 
-  if (veryStrong && riskManager.tradeAllowed && smartEntry.entryDecision !== "WAIT") {
-    return "TAKE TRADE";
-  }
+    entry: round(entry),
+    stop: round(stop),
+    target1: round(target1),
+    target2: round(target2),
 
-  if (veryStrong) return "A+ WATCH";
+    riskLevel: riskManager.riskLevel || "UNKNOWN",
+    riskScore: riskManager.riskScore || 0,
 
-  if (strong) return "WATCH FOR ENTRY";
+    setupName: setup.setupName || "UNKNOWN",
+    smartEntryDecision: smartEntry.entryDecision || "WAIT",
 
-  if (score >= 55) return "WATCH CHART";
+    summary,
+    reasons,
+    warnings,
 
-  return "NO TRADE";
-}
-
-function buildSummary(score, direction, action) {
-  return `${action}: ${direction} with master score ${score}/100. Confirm on NinjaTrader/Tradovate before entering.`;
+    checklist: [
+      { name: "Market score strong", passed: Number(analysis.score || 0) >= 75 },
+      { name: "Institutional score strong", passed: Number(setup.score || 0) >= 70 },
+      { name: "Direction detected", passed: direction === "LONG" || direction === "SHORT" },
+      { name: "Risk not hard-blocking", passed: !(riskManager.tradeAllowed === false && Number(riskManager.riskScore || 0) < 25) },
+    ],
+  };
 }
 
 module.exports = { buildMasterDecision };
