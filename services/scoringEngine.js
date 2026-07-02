@@ -16,6 +16,8 @@ function analyzeTimeframe(candles = []) {
     return {
       bias: "NEUTRAL",
       score: 0,
+      long: 0,
+      short: 0,
       ema9: 0,
       ema20: 0,
       ema50: 0,
@@ -25,82 +27,53 @@ function analyzeTimeframe(candles = []) {
   }
 
   const indicators = calculateIndicators(candles);
-  const price = candles[candles.length - 1].close;
+  const price = Number(candles[candles.length - 1].close);
 
   let long = 0;
   let short = 0;
 
-  if (price > indicators.vwap) long += 25;
-  else short += 25;
+  if (price > indicators.vwap) long += 20;
+  if (price < indicators.vwap) short += 20;
 
-  if (
-    indicators.ema9 > indicators.ema20 &&
-    indicators.ema20 > indicators.ema50 &&
-    price > indicators.ema9
-  ) {
-    long += 35;
-  } else if (
-    indicators.ema9 < indicators.ema20 &&
-    indicators.ema20 < indicators.ema50 &&
-    price < indicators.ema9
-  ) {
-    short += 35;
+  if (indicators.ema9 > indicators.ema20 && indicators.ema20 > indicators.ema50) {
+    long += 25;
   }
 
-  if (indicators.rsi >= 55 && indicators.rsi <= 75) long += 20;
-  else if (indicators.rsi <= 45 && indicators.rsi >= 25) short += 20;
+  if (indicators.ema9 < indicators.ema20 && indicators.ema20 < indicators.ema50) {
+    short += 25;
+  }
 
-  if (price > candles[0].open) long += 20;
-  else short += 20;
+  if (price > indicators.ema9) long += 15;
+  if (price < indicators.ema9) short += 15;
 
-  const bias =
-    long > short + 15 ? "LONG" : short > long + 15 ? "SHORT" : "NEUTRAL";
+  if (indicators.rsi >= 52 && indicators.rsi <= 75) long += 15;
+  if (indicators.rsi <= 48 && indicators.rsi >= 25) short += 15;
+
+  if (price > Number(candles[0].open)) long += 15;
+  if (price < Number(candles[0].open)) short += 15;
+
+  const difference = Math.abs(long - short);
+
+  let bias = "NEUTRAL";
+  if (long > short && difference >= 8) bias = "LONG";
+  if (short > long && difference >= 8) bias = "SHORT";
 
   return {
     bias,
     score: Math.max(long, short),
     long,
     short,
-    ema9: indicators.ema9,
-    ema20: indicators.ema20,
-    ema50: indicators.ema50,
-    vwap: indicators.vwap,
-    rsi: indicators.rsi,
+    ema9: round(indicators.ema9),
+    ema20: round(indicators.ema20),
+    ema50: round(indicators.ema50),
+    vwap: round(indicators.vwap),
+    rsi: round(indicators.rsi),
   };
 }
 
-function calculateScore(data) {
- if (data.mode === "STALE" || data.mode === "FALLBACK") {
-    return {
-      score: 0,
-      grade: "F",
-      confidence: "LOW",
-      bias: "NEUTRAL",
-      signal: "NO TRADE - DATA STALE",
-
-      longScore: 0,
-      shortScore: 0,
-      longProbability: 50,
-      shortProbability: 50,
-
-      entry: 0,
-      stop: 0,
-      target1: 0,
-      target2: 0,
-      target: 0,
-      riskReward: 0,
-
-      range: 0,
-      midpoint: 0,
-      positionInRange: 0,
-
-      indicators: {},
-      structure: {},
-      multiTimeframe: {},
-
-      reasons: [],
-      warnings: ["Market data is stale. Do not trade from this signal."],
-    };
+function calculateScore(data = {}) {
+  if (data.mode === "STALE" || data.mode === "FALLBACK") {
+    return staleScore(data.mode);
   }
 
   const price = Number(data.price || 0);
@@ -109,10 +82,15 @@ function calculateScore(data) {
   const low = Number(data.low || price);
   const candles = Array.isArray(data.candles) ? data.candles : [];
 
+  if (!price || !candles.length) {
+    return staleScore("NO DATA");
+  }
+
   const indicators = calculateIndicators(candles);
   const structure = analyzeStructure(candles);
 
   const tf = data.timeframes || {};
+
   const multiTimeframe = {
     "1m": analyzeTimeframe(tf["1m"] || candles),
     "5m": analyzeTimeframe(tf["5m"] || []),
@@ -120,9 +98,9 @@ function calculateScore(data) {
     "1h": analyzeTimeframe(tf["1h"] || []),
   };
 
-  const tfBiases = Object.values(multiTimeframe).map((t) => t.bias);
-  const longTF = tfBiases.filter((b) => b === "LONG").length;
-  const shortTF = tfBiases.filter((b) => b === "SHORT").length;
+  const tfValues = Object.values(multiTimeframe);
+  const longTF = tfValues.filter((t) => t.bias === "LONG").length;
+  const shortTF = tfValues.filter((t) => t.bias === "SHORT").length;
 
   const range = Math.max(high - low, 0.25);
   const midpoint = (high + low) / 2;
@@ -130,173 +108,147 @@ function calculateScore(data) {
 
   let longScore = 0;
   let shortScore = 0;
+
   const reasons = [];
   const warnings = [];
 
   if (price > open) {
     longScore += 8;
-    reasons.push("Price above session open");
-  } else {
+    reasons.push("Price is above session open.");
+  }
+
+  if (price < open) {
     shortScore += 8;
-    reasons.push("Price below session open");
+    reasons.push("Price is below session open.");
   }
 
   if (price > midpoint) {
     longScore += 8;
-    reasons.push("Price above session midpoint");
-  } else {
+    reasons.push("Price is above session midpoint.");
+  }
+
+  if (price < midpoint) {
     shortScore += 8;
-    reasons.push("Price below session midpoint");
+    reasons.push("Price is below session midpoint.");
   }
 
   if (price > indicators.vwap) {
     longScore += 12;
-    reasons.push("Price above VWAP");
-  } else {
-    shortScore += 12;
-    reasons.push("Price below VWAP");
+    reasons.push("Price is above VWAP.");
   }
 
-  if (
-    indicators.ema9 > indicators.ema20 &&
-    indicators.ema20 > indicators.ema50 &&
-    price > indicators.ema9
-  ) {
-    longScore += 18;
-    reasons.push("EMA trend aligned bullish");
-  } else if (
-    indicators.ema9 < indicators.ema20 &&
-    indicators.ema20 < indicators.ema50 &&
-    price < indicators.ema9
-  ) {
-    shortScore += 18;
-    reasons.push("EMA trend aligned bearish");
-  } else {
-    warnings.push("EMA trend mixed");
+  if (price < indicators.vwap) {
+    shortScore += 12;
+    reasons.push("Price is below VWAP.");
+  }
+
+  if (indicators.ema9 > indicators.ema20 && indicators.ema20 > indicators.ema50) {
+    longScore += 15;
+    reasons.push("EMA trend supports LONG.");
+  }
+
+  if (indicators.ema9 < indicators.ema20 && indicators.ema20 < indicators.ema50) {
+    shortScore += 15;
+    reasons.push("EMA trend supports SHORT.");
+  }
+
+  if (price > indicators.ema9) {
+    longScore += 8;
+    reasons.push("Price is above EMA 9.");
+  }
+
+  if (price < indicators.ema9) {
+    shortScore += 8;
+    reasons.push("Price is below EMA 9.");
   }
 
   if (structure.structureBias === "LONG") {
     longScore += 15;
-    reasons.push("Bullish market structure");
-  } else if (structure.structureBias === "SHORT") {
+    reasons.push("Market structure favors LONG.");
+  }
+
+  if (structure.structureBias === "SHORT") {
     shortScore += 15;
-    reasons.push("Bearish market structure");
-  } else {
-    warnings.push("Market structure mixed");
+    reasons.push("Market structure favors SHORT.");
   }
 
-  if (structure.breakOfStructure && structure.structureBias === "LONG") {
+  if (structure.bullishBreak) {
     longScore += 8;
-    reasons.push("Bullish break of structure");
+    reasons.push("Bullish break of structure detected.");
   }
 
-  if (structure.breakOfStructure && structure.structureBias === "SHORT") {
+  if (structure.bearishBreak) {
     shortScore += 8;
-    reasons.push("Bearish break of structure");
+    reasons.push("Bearish break of structure detected.");
   }
 
-  if (structure.changeOfCharacter) {
-    warnings.push("Change of character detected");
+  if (longTF >= 2) {
+    longScore += 15;
+    reasons.push(`${longTF} timeframes support LONG.`);
   }
 
-  if (longTF >= 3) {
-    longScore += 20;
-    reasons.push("Multi-timeframe trend supports LONG");
-  } else if (shortTF >= 3) {
-    shortScore += 20;
-    reasons.push("Multi-timeframe trend supports SHORT");
-  } else {
-    warnings.push("Multi-timeframe trend is mixed");
+  if (shortTF >= 2) {
+    shortScore += 15;
+    reasons.push(`${shortTF} timeframes support SHORT.`);
   }
 
-  if (indicators.rsi >= 55 && indicators.rsi <= 75) {
+  if (indicators.rsi >= 52 && indicators.rsi <= 75) {
     longScore += 8;
-    reasons.push("RSI supports bullish momentum");
-  } else if (indicators.rsi <= 45 && indicators.rsi >= 25) {
+    reasons.push("RSI supports LONG momentum.");
+  }
+
+  if (indicators.rsi <= 48 && indicators.rsi >= 25) {
     shortScore += 8;
-    reasons.push("RSI supports bearish momentum");
-  } else if (indicators.rsi > 80) {
-    warnings.push("RSI overbought");
-  } else if (indicators.rsi < 20) {
-    warnings.push("RSI oversold");
+    reasons.push("RSI supports SHORT momentum.");
   }
 
-  if (indicators.rvol >= 1.5) {
+  if (indicators.rvol >= 1.2) {
+    longScore += 4;
+    shortScore += 4;
+    reasons.push("Relative volume is acceptable.");
+  } else {
+    warnings.push("Relative volume is weak.");
+  }
+
+  if (positionInRange >= 65) {
     longScore += 5;
+    reasons.push("Price is trading in the upper part of range.");
+  }
+
+  if (positionInRange <= 35) {
     shortScore += 5;
-    reasons.push("Relative volume elevated");
-  } else {
-    warnings.push("Relative volume normal or weak");
+    reasons.push("Price is trading in the lower part of range.");
   }
 
-  if (positionInRange >= 70) {
-    longScore += 6;
-    reasons.push("Price trading in upper range");
-  } else if (positionInRange <= 30) {
-    shortScore += 6;
-    reasons.push("Price trading in lower range");
+  if (range >= 30) {
+    longScore += 4;
+    shortScore += 4;
+    reasons.push("Volatility is healthy.");
   } else {
-    warnings.push("Price is mid-range");
+    warnings.push("Volatility is low.");
   }
 
-  if (range >= 40) {
-    longScore += 5;
-    shortScore += 5;
-    reasons.push("Healthy volatility");
-  } else {
-    warnings.push("Low volatility");
-  }
-
-  longScore = clamp(longScore);
-  shortScore = clamp(shortScore);
+  longScore = clamp(Math.round(longScore));
+  shortScore = clamp(Math.round(shortScore));
 
   const difference = Math.abs(longScore - shortScore);
 
   let bias = "NEUTRAL";
-  if (longScore > shortScore && difference >= 15) bias = "LONG";
-  if (shortScore > longScore && difference >= 15) bias = "SHORT";
+  if (longScore > shortScore && difference >= 8) bias = "LONG";
+  if (shortScore > longScore && difference >= 8) bias = "SHORT";
 
   const score = Math.max(longScore, shortScore);
 
-  let longProbability = 50;
-  let shortProbability = 50;
+  const total = longScore + shortScore || 1;
+  const longProbability = Math.round((longScore / total) * 100);
+  const shortProbability = 100 - longProbability;
 
-  if (bias !== "NEUTRAL") {
-    const total = longScore + shortScore || 1;
-    longProbability = Math.round((longScore / total) * 100);
-    shortProbability = 100 - longProbability;
-  }
+  const { grade, confidence, signal } = buildGradeSignal(bias, score);
 
-  let grade = "F";
-  let confidence = "LOW";
-  let signal = "NO TRADE - MIXED CONDITIONS";
-
-  if (bias !== "NEUTRAL" && score >= 90) {
-    grade = "A+";
-    confidence = "EXTREME";
-    signal = `${bias} A+ SETUP`;
-  } else if (bias !== "NEUTRAL" && score >= 80) {
-    grade = "A";
-    confidence = "HIGH";
-    signal = `${bias} A SETUP`;
-  } else if (bias !== "NEUTRAL" && score >= 70) {
-    grade = "B+";
-    confidence = "MEDIUM-HIGH";
-    signal = `${bias} VERY GOOD SETUP`;
-  } else if (bias !== "NEUTRAL" && score >= 60) {
-    grade = "B";
-    confidence = "MEDIUM";
-    signal = `${bias} GOOD SETUP`;
-  } else if (bias !== "NEUTRAL" && score >= 50) {
-    grade = "C";
-    confidence = "LOW-MEDIUM";
-    signal = `${bias} WEAK SETUP`;
-  }
-
-  const entry = bias === "SHORT" ? price - 2 : price + 2;
-  const stop = bias === "SHORT" ? price + 22 : price - 22;
-  const target1 = bias === "SHORT" ? price - 40 : price + 40;
-  const target2 = bias === "SHORT" ? price - 70 : price + 70;
+  const entry = bias === "SHORT" ? price - 2 : bias === "LONG" ? price + 2 : price;
+  const stop = bias === "SHORT" ? price + 22 : bias === "LONG" ? price - 22 : 0;
+  const target1 = bias === "SHORT" ? price - 40 : bias === "LONG" ? price + 40 : 0;
+  const target2 = bias === "SHORT" ? price - 70 : bias === "LONG" ? price + 70 : 0;
 
   const risk = Math.abs(entry - stop);
   const reward = Math.abs(target2 - entry);
@@ -307,6 +259,7 @@ function calculateScore(data) {
     grade,
     confidence,
     bias,
+    direction: bias,
     signal,
 
     longScore,
@@ -331,6 +284,96 @@ function calculateScore(data) {
 
     reasons,
     warnings,
+  };
+}
+
+function buildGradeSignal(bias, score) {
+  if (bias !== "LONG" && bias !== "SHORT") {
+    return {
+      grade: "F",
+      confidence: "LOW",
+      signal: "NO TRADE - MIXED CONDITIONS",
+    };
+  }
+
+  if (score >= 90) {
+    return {
+      grade: "A+",
+      confidence: "EXTREME",
+      signal: `${bias} A+ SETUP`,
+    };
+  }
+
+  if (score >= 80) {
+    return {
+      grade: "A",
+      confidence: "HIGH",
+      signal: `${bias} A SETUP`,
+    };
+  }
+
+  if (score >= 70) {
+    return {
+      grade: "B+",
+      confidence: "MEDIUM-HIGH",
+      signal: `${bias} VERY GOOD SETUP`,
+    };
+  }
+
+  if (score >= 60) {
+    return {
+      grade: "B",
+      confidence: "MEDIUM",
+      signal: `${bias} GOOD SETUP`,
+    };
+  }
+
+  if (score >= 50) {
+    return {
+      grade: "C",
+      confidence: "LOW-MEDIUM",
+      signal: `${bias} WEAK SETUP`,
+    };
+  }
+
+  return {
+    grade: "D",
+    confidence: "LOW",
+    signal: `${bias} WATCH ONLY`,
+  };
+}
+
+function staleScore(mode) {
+  return {
+    score: 0,
+    grade: "F",
+    confidence: "LOW",
+    bias: "NEUTRAL",
+    direction: "NEUTRAL",
+    signal: `NO TRADE - ${mode}`,
+
+    longScore: 0,
+    shortScore: 0,
+    longProbability: 50,
+    shortProbability: 50,
+
+    entry: 0,
+    stop: 0,
+    target1: 0,
+    target2: 0,
+    target: 0,
+    riskReward: 0,
+
+    range: 0,
+    midpoint: 0,
+    positionInRange: 0,
+
+    indicators: {},
+    structure: {},
+    multiTimeframe: {},
+
+    reasons: [],
+    warnings: [`Market data mode is ${mode}. Do not trade from this signal.`],
   };
 }
 
