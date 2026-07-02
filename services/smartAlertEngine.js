@@ -19,16 +19,19 @@ function buildSmartAlert({
   trendContinuation = {},
 }) {
   const direction =
-    executionPlan.direction ||
     masterDecision.direction ||
+    executionPlan.direction ||
     entryTiming.direction ||
     smartEntry.direction ||
+    institutional.direction ||
     analysis.bias ||
+    analysis.direction ||
     "NEUTRAL";
 
   const executionScore = Number(executionPlan.executionScore || executionPlan.score || 0);
   const masterScore = Number(masterDecision.masterScore || masterDecision.score || 0);
-  const marketScore = Number(analysis.score || 0);
+  const marketScore = Number(analysis.score || analysis.marketScore || 0);
+  const institutionalScore = Number(institutional.institutionalScore || institutional.score || 0);
   const riskScore = Number(riskManager.riskScore || 0);
 
   const reasons = [];
@@ -39,46 +42,54 @@ function buildSmartAlert({
   let alertType = "NONE";
   let urgency = "LOW";
 
-  if (executionPlan.status === "ENTER NOW") {
-    alertScore += 35;
-    reasons.push("Execution Plan says ENTER NOW.");
-  } else if (executionPlan.status === "WATCH FOR TRIGGER") {
-    alertScore += 20;
-    reasons.push("Execution Plan is watching for trigger.");
-  } else {
-    warnings.push("Execution Plan is not ready.");
+  if (direction === "NEUTRAL") {
+    return noAlert("No clear LONG or SHORT direction.", direction);
   }
 
-  if (masterDecision.action === "TAKE TRADE") {
-    alertScore += 25;
-    reasons.push("Master Decision says TAKE TRADE.");
-  } else if (masterDecision.action === "WATCH FOR ENTRY") {
-    alertScore += 15;
-    reasons.push("Master Decision says WATCH FOR ENTRY.");
+  alertScore += addScore(masterScore, 25, "Master decision score", reasons, warnings);
+  alertScore += addScore(marketScore, 20, "Market score", reasons, warnings);
+  alertScore += addScore(institutionalScore, 20, "Institutional score", reasons, warnings);
+  alertScore += addScore(executionScore, 15, "Execution score", reasons, warnings);
+
+  if (
+    masterDecision.action === "TAKE TRADE" ||
+    masterDecision.action === "A+ WATCH" ||
+    masterDecision.action === "WATCH FOR ENTRY"
+  ) {
+    alertScore += 10;
+    reasons.push(`Master action is ${masterDecision.action}.`);
   } else {
-    warnings.push("Master Decision is not approving a trade.");
+    warnings.push(`Master action is ${masterDecision.action || "UNKNOWN"}.`);
+  }
+
+  if (
+    executionPlan.status === "ENTER NOW" ||
+    executionPlan.status === "WATCH FOR TRIGGER"
+  ) {
+    alertScore += 8;
+    reasons.push(`Execution status is ${executionPlan.status}.`);
+  } else {
+    warnings.push(`Execution status is ${executionPlan.status || "UNKNOWN"}.`);
   }
 
   if (riskManager.tradeAllowed) {
-    alertScore += 15;
+    alertScore += 7;
     reasons.push("Risk Manager allows the setup.");
+  } else if (riskScore >= 40) {
+    alertScore += 3;
+    warnings.push("Risk Manager is cautious, but not a full rejection.");
   } else {
     warnings.push("Risk Manager blocks the setup.");
   }
 
-  if (marketScore >= 80) {
-    alertScore += 10;
-    reasons.push("Market score is strong.");
-  } else if (marketScore >= 65) {
+  if (fvg.direction === direction || fvg.activeFVG) {
     alertScore += 5;
-    reasons.push("Market score is decent.");
-  } else {
-    warnings.push("Market score is not strong.");
+    reasons.push("FVG supports the setup.");
   }
 
-  if (institutional.direction === direction && Number(institutional.institutionalScore || 0) >= 70) {
+  if (liquidity.sweep || liquidity.liquiditySweep || liquidity.bias) {
     alertScore += 5;
-    reasons.push("Institutional engine aligns.");
+    reasons.push("Liquidity condition is present.");
   }
 
   if (trendContinuation.direction === direction) {
@@ -86,18 +97,8 @@ function buildSmartAlert({
     reasons.push("Trend continuation aligns.");
   }
 
-  if (fvg.activeFVG && fvg.direction === direction) {
-    alertScore += 5;
-    reasons.push("FVG supports the setup.");
-  }
-
-  if (liquidity.sweep || liquidity.liquiditySweep) {
-    alertScore += 5;
-    reasons.push("Liquidity sweep detected.");
-  }
-
   if (!volumeProfile.insideValue) {
-    alertScore += 3;
+    alertScore += 2;
     reasons.push("Volume profile is not inside value.");
   } else {
     warnings.push("Price is inside value; chop risk.");
@@ -105,21 +106,45 @@ function buildSmartAlert({
 
   alertScore = Math.max(0, Math.min(100, Math.round(alertScore)));
 
-  if (executionPlan.status === "ENTER NOW" && alertScore >= 80 && riskManager.tradeAllowed) {
+  const grade = getGrade(alertScore);
+
+  if (
+    executionPlan.status === "ENTER NOW" &&
+    alertScore >= 80 &&
+    riskManager.tradeAllowed
+  ) {
     shouldAlert = true;
     alertType = `${direction} ENTRY NOW`;
     urgency = "HIGH";
-  } else if (executionPlan.status === "WATCH FOR TRIGGER" && alertScore >= 65 && riskManager.tradeAllowed) {
+  } else if (
+    masterDecision.action === "TAKE TRADE" &&
+    alertScore >= 75
+  ) {
+    shouldAlert = true;
+    alertType = `${direction} TAKE TRADE`;
+    urgency = "HIGH";
+  } else if (
+    masterDecision.action === "A+ WATCH" ||
+    alertScore >= 80 ||
+    institutionalScore >= 85 ||
+    marketScore >= 85
+  ) {
+    shouldAlert = true;
+    alertType = `${direction} A+ WATCH`;
+    urgency = "MEDIUM";
+  } else if (
+    masterDecision.action === "WATCH FOR ENTRY" ||
+    executionPlan.status === "WATCH FOR TRIGGER" ||
+    alertScore >= 65
+  ) {
     shouldAlert = true;
     alertType = `${direction} WATCH`;
     urgency = "MEDIUM";
-  } else if (masterDecision.action?.includes("NO TRADE") || executionPlan.status?.includes("NO EXECUTION")) {
+  } else {
     shouldAlert = false;
     alertType = "NO TRADE";
     urgency = "LOW";
   }
-
-  const grade = getGrade(alertScore);
 
   return {
     shouldAlert,
@@ -140,6 +165,7 @@ function buildSmartAlert({
       executionPlan,
       masterDecision,
       riskManager,
+      urgency,
     }),
 
     price: round(market.price),
@@ -147,13 +173,14 @@ function buildSmartAlert({
     stop: round(executionPlan.stop || masterDecision.stop || smartEntry.stopLoss),
     target1: round(executionPlan.target1 || masterDecision.target1 || smartEntry.target1),
     target2: round(executionPlan.target2 || masterDecision.target2 || smartEntry.target2),
-    riskReward: executionPlan.riskReward || "--",
+    riskReward: executionPlan.riskReward || smartEntry.riskReward || "--",
 
-    executionStatus: executionPlan.status || "--",
+    executionStatus: executionPlan.status || executionPlan.executionStatus || "--",
     masterAction: masterDecision.action || "--",
     masterScore,
     executionScore,
     marketScore,
+    institutionalScore,
     riskScore,
 
     summary: shouldAlert
@@ -165,20 +192,29 @@ function buildSmartAlert({
 
     checklist: [
       {
-        name: "Execution plan ready",
-        passed: executionPlan.status === "ENTER NOW" || executionPlan.status === "WATCH FOR TRIGGER",
+        name: "Direction detected",
+        passed: direction === "LONG" || direction === "SHORT",
       },
       {
         name: "Master decision ready",
-        passed: masterDecision.action === "TAKE TRADE" || masterDecision.action === "WATCH FOR ENTRY",
+        passed:
+          masterDecision.action === "TAKE TRADE" ||
+          masterDecision.action === "A+ WATCH" ||
+          masterDecision.action === "WATCH FOR ENTRY",
       },
       {
-        name: "Risk approved",
-        passed: riskManager.tradeAllowed === true,
+        name: "Execution plan ready",
+        passed:
+          executionPlan.status === "ENTER NOW" ||
+          executionPlan.status === "WATCH FOR TRIGGER",
       },
       {
         name: "Market score strong enough",
         passed: marketScore >= 65,
+      },
+      {
+        name: "Institutional score strong enough",
+        passed: institutionalScore >= 65,
       },
       {
         name: "Alert score strong enough",
@@ -186,6 +222,33 @@ function buildSmartAlert({
       },
     ],
   };
+}
+
+function addScore(score, maxPoints, label, reasons, warnings) {
+  const n = Number(score || 0);
+
+  if (n >= 90) {
+    reasons.push(`${label} is excellent.`);
+    return maxPoints;
+  }
+
+  if (n >= 80) {
+    reasons.push(`${label} is strong.`);
+    return Math.round(maxPoints * 0.85);
+  }
+
+  if (n >= 70) {
+    reasons.push(`${label} is good.`);
+    return Math.round(maxPoints * 0.7);
+  }
+
+  if (n >= 60) {
+    reasons.push(`${label} is decent.`);
+    return Math.round(maxPoints * 0.5);
+  }
+
+  warnings.push(`${label} is weak.`);
+  return 0;
 }
 
 function getGrade(score) {
@@ -211,6 +274,7 @@ function buildMessage({
   executionPlan,
   masterDecision,
   riskManager,
+  urgency,
 }) {
   if (!shouldAlert) {
     return "No high-quality alert right now. Stand by.";
@@ -218,6 +282,7 @@ function buildMessage({
 
   return [
     `${grade} ${alertType}`,
+    `Urgency: ${urgency}`,
     `Direction: ${direction}`,
     `Price: ${round(market.price)}`,
     `Entry: ${round(executionPlan.entry || masterDecision.entry)}`,
@@ -226,7 +291,39 @@ function buildMessage({
     `Target 2: ${round(executionPlan.target2 || masterDecision.target2)}`,
     `R:R: ${executionPlan.riskReward || "--"}`,
     `Risk: ${riskManager.riskLevel || "--"}`,
+    `Note: Confirm on NinjaTrader/Tradovate before entering.`,
   ].join("\n");
+}
+
+function noAlert(summary, direction = "NEUTRAL") {
+  return {
+    shouldAlert: false,
+    alertType: "NO TRADE",
+    urgency: "LOW",
+    direction,
+    alertScore: 0,
+    score: 0,
+    grade: "D",
+    title: "No Trade Alert",
+    message: summary,
+    price: 0,
+    entry: 0,
+    stop: 0,
+    target1: 0,
+    target2: 0,
+    riskReward: "--",
+    executionStatus: "--",
+    masterAction: "--",
+    masterScore: 0,
+    executionScore: 0,
+    marketScore: 0,
+    institutionalScore: 0,
+    riskScore: 0,
+    summary,
+    reasons: [],
+    warnings: [summary],
+    checklist: [],
+  };
 }
 
 module.exports = { buildSmartAlert };

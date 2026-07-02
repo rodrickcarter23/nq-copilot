@@ -4,16 +4,27 @@ function round(value, decimals = 2) {
   return Number(n.toFixed(decimals));
 }
 
-function buildSmartEntry(market, analysis, setup, institutional) {
+function buildSmartEntry(market, analysis = {}, setup = {}, institutional = {}) {
   const price = Number(market.price || 0);
   const indicators = analysis.indicators || {};
   const structure = analysis.structure || {};
 
-  const direction = institutional.direction || analysis.bias || "NEUTRAL";
-  const instScore = Number(institutional.institutionalScore || 0);
+  const direction =
+    institutional.direction ||
+    analysis.bias ||
+    analysis.direction ||
+    setup.direction ||
+    "NEUTRAL";
 
-  if (direction === "NEUTRAL" || institutional.decision === "NO TRADE") {
-    return noEntry("No clean institutional entry detected.");
+  const instScore = Number(
+    institutional.institutionalScore ||
+      institutional.score ||
+      analysis.score ||
+      0
+  );
+
+  if (!price || direction === "NEUTRAL" || institutional.decision === "NO TRADE") {
+    return noEntry("No clean directional entry detected.");
   }
 
   const atr = Number(indicators.atr || 10);
@@ -37,19 +48,23 @@ function buildSmartEntry(market, analysis, setup, institutional) {
     entryZoneHigh = pullbackLevel + atr * 0.35;
 
     const swingStop = Number(structure.lastSwingLow || 0);
-    stopLoss = swingStop > 0 ? Math.min(swingStop, entryZoneLow - atr) : entryZoneLow - atr * 1.5;
+    stopLoss =
+      swingStop > 0
+        ? Math.min(swingStop, entryZoneLow - atr)
+        : entryZoneLow - atr * 1.5;
 
     target1 = price + atr * 3;
     target2 = price + atr * 5;
 
     entryType = "LONG PULLBACK ZONE";
-    confirmation = "Wait for price to pull back into the EMA/VWAP zone and close bullish.";
+    confirmation =
+      "Wait for price to pull back into the EMA/VWAP zone and close bullish.";
 
     checklist.push(
       check("Price above VWAP", price > vwap),
       check("EMA 20 support nearby", Math.abs(price - ema20) <= atr * 4),
       check("Bullish structure", structure.structureBias === "LONG"),
-      check("Institutional score 75+", instScore >= 75),
+      check("Institutional score 70+", instScore >= 70),
       check("Avoid chasing extended price", price <= entryZoneHigh + atr * 3)
     );
 
@@ -64,19 +79,23 @@ function buildSmartEntry(market, analysis, setup, institutional) {
     entryZoneHigh = pullbackLevel + atr * 0.35;
 
     const swingStop = Number(structure.lastSwingHigh || 0);
-    stopLoss = swingStop > 0 ? Math.max(swingStop, entryZoneHigh + atr) : entryZoneHigh + atr * 1.5;
+    stopLoss =
+      swingStop > 0
+        ? Math.max(swingStop, entryZoneHigh + atr)
+        : entryZoneHigh + atr * 1.5;
 
     target1 = price - atr * 3;
     target2 = price - atr * 5;
 
     entryType = "SHORT PULLBACK ZONE";
-    confirmation = "Wait for price to pull back into the EMA/VWAP zone and close bearish.";
+    confirmation =
+      "Wait for price to pull back into the EMA/VWAP zone and close bearish.";
 
     checklist.push(
       check("Price below VWAP", price < vwap),
       check("EMA 20 resistance nearby", Math.abs(price - ema20) <= atr * 4),
       check("Bearish structure", structure.structureBias === "SHORT"),
-      check("Institutional score 75+", instScore >= 75),
+      check("Institutional score 70+", instScore >= 70),
       check("Avoid chasing extended price", price >= entryZoneLow - atr * 3)
     );
 
@@ -89,24 +108,32 @@ function buildSmartEntry(market, analysis, setup, institutional) {
   const reward = Math.abs(target2 - midEntry);
   const riskReward = risk > 0 ? reward / risk : 0;
 
-  const entryDecision =
-    instScore >= 85
-      ? "WAIT FOR PULLBACK"
-      : instScore >= 75
-      ? "WAIT FOR CONFIRMATION"
-      : "WATCH ONLY";
+  const passedChecks = checklist.filter((item) => item.passed).length;
+
+  let entryDecision = "WATCH ONLY";
+
+  if (instScore >= 90 && passedChecks >= 3) {
+    entryDecision = "A+ WATCH";
+  } else if (instScore >= 80 && passedChecks >= 3) {
+    entryDecision = "WATCH FOR ENTRY";
+  } else if (instScore >= 70) {
+    entryDecision = "WAIT FOR CONFIRMATION";
+  } else {
+    entryDecision = "WATCH ONLY";
+  }
 
   const entryZone = `${round(entryZoneLow)} - ${round(entryZoneHigh)}`;
 
   return {
     entryDecision,
     action: entryDecision,
-
     direction,
     entryType,
     entryZone,
     entryZoneLow: round(entryZoneLow),
     entryZoneHigh: round(entryZoneHigh),
+
+    entry: round(midEntry),
 
     stopLoss: round(stopLoss),
     stop: round(stopLoss),
@@ -136,6 +163,7 @@ function noEntry(reason) {
     entryZone: "--",
     entryZoneLow: 0,
     entryZoneHigh: 0,
+    entry: 0,
     stopLoss: 0,
     stop: 0,
     target1: 0,
