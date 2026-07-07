@@ -1,97 +1,70 @@
-require("dotenv").config();
+function shouldSendDiscordAlert({ smartAlert, masterDecision, executionPlan, market }) {
+  const signal = String(
+    smartAlert?.title ||
+      smartAlert?.alertType ||
+      masterDecision?.action ||
+      executionPlan?.executionStatus ||
+      ""
+  ).toUpperCase();
 
-const express = require("express");
-const cors = require("cors");
+  const direction = String(
+    smartAlert?.direction ||
+      masterDecision?.direction ||
+      executionPlan?.direction ||
+      ""
+  ).toUpperCase();
 
-const { getNQPrice } = require("./services/marketData");
-const { calculateScore } = require("./services/scoringEngine");
-const { sendDiscordAlert } = require("./services/alertEngine");
-const { generateCoach } = require("./services/aiCoach");
-const { detectSetup } = require("./services/setupEngine");
-const { buildInstitutionalDecision } = require("./services/institutionalEngine");
-const { buildSmartEntry } = require("./services/smartEntryEngine");
-const { applyConsistencyRules } = require("./services/consistencyEngine");
-const { detectOrderBlocks } = require("./services/orderBlockEngine");
-const { detectTrendContinuation } = require("./services/trendContinuationEngine");
-const { detectLiquidity } = require("./services/liquidityEngine");
-const { detectVolumeProfile } = require("./services/volumeProfileEngine");
-const { detectFVG } = require("./services/fvgEngine");
-const { detectPremiumDiscount } = require("./services/premiumDiscountEngine");
+  const grade = String(
+    smartAlert?.grade ||
+      masterDecision?.grade ||
+      ""
+  ).toUpperCase();
 
-const app = express();
+  const action = String(masterDecision?.action || "").toUpperCase();
+  const executionStatus = String(executionPlan?.status || executionPlan?.executionStatus || "").toUpperCase();
 
-app.use(cors());
-app.use(express.json());
+  const isLongOrShort =
+    direction.includes("LONG") || direction.includes("SHORT");
 
-app.get("/", (req, res) => {
-  res.send("🚀 NQ Co-Pilot Server Running");
-});
+  const isWatchAlert =
+    signal.includes("WATCH") ||
+    action.includes("WATCH") ||
+    executionStatus.includes("WATCH");
 
-app.get("/api/analysis", async (req, res) => {
-  try {
-    const market = await getNQPrice();
+  const isEntryAlert =
+    signal.includes("ENTER") ||
+    signal.includes("TAKE TRADE") ||
+    action.includes("TAKE TRADE") ||
+    executionStatus.includes("ENTER NOW");
 
-    const rawAnalysis = calculateScore(market);
-    const rawSetup = detectSetup(market, rawAnalysis);
+  const isStrongGrade =
+    grade.includes("A+") ||
+    grade === "A" ||
+    grade === "B+";
 
-    const rawInstitutional = buildInstitutionalDecision(
-      market,
-      rawAnalysis,
-      rawSetup
-    );
+  const shouldAlert =
+    smartAlert?.shouldAlert === true ||
+    isWatchAlert ||
+    isEntryAlert ||
+    isStrongGrade;
 
-    const rawSmartEntry = buildSmartEntry(
-      market,
-      rawAnalysis,
-      rawSetup,
-      rawInstitutional
-    );
+  if (!isLongOrShort) return false;
+  if (!shouldAlert) return false;
 
-    const cleaned = applyConsistencyRules(
-      rawAnalysis,
-      rawSetup,
-      rawInstitutional,
-      rawSmartEntry
-    );
+  const key = `${direction}-${action}-${executionStatus}-${grade}-${Math.round(Number(market?.price || 0))}`;
+  const now = Date.now();
 
-    const orderBlocks = detectOrderBlocks(market);
-    const trendContinuation = detectTrendContinuation(market, cleaned.analysis);
-    const liquidity = detectLiquidity(market, cleaned.analysis);
-    const volumeProfile = detectVolumeProfile(market, cleaned.analysis);
-    const fvg = detectFVG(market, cleaned.analysis);
-    const premiumDiscount = detectPremiumDiscount(market, cleaned.analysis);
+  const WATCH_COOLDOWN_MS = 2 * 60 * 1000;
+  const ENTRY_COOLDOWN_MS = 5 * 60 * 1000;
 
-    const coach = generateCoach(market, cleaned.analysis);
+  const cooldown = isEntryAlert ? ENTRY_COOLDOWN_MS : WATCH_COOLDOWN_MS;
 
-    await sendDiscordAlert(market, cleaned.analysis);
-
-    res.json({
-      success: true,
-      market,
-      analysis: cleaned.analysis,
-      setup: cleaned.setup,
-      institutional: cleaned.institutional,
-      smartEntry: cleaned.smartEntry,
-      orderBlocks,
-      trendContinuation,
-      liquidity,
-      volumeProfile,
-      fvg,
-      premiumDiscount,
-      coach,
-    });
-  } catch (error) {
-    console.error("Analysis error:", error.message);
-
-    res.status(500).json({
-      success: false,
-      error: "Server error running analysis",
-    });
+  if (key === lastDiscordAlertKey && now - lastDiscordAlertTime < cooldown) {
+    return false;
   }
-});
 
-const PORT = process.env.PORT || 3001;
+  lastDiscordAlertKey = key;
+  lastDiscordAlertTime = now;
 
-app.listen(PORT, () => {
-  console.log(`🚀 NQ Co-Pilot Server running on port ${PORT}`);
-});
+  return true;
+}
